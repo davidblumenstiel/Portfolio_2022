@@ -1,0 +1,183 @@
+---
+title: 'Project 4: Spam Filter'
+author: "David Blumenstiel"
+date: "4/20/2020"
+output: rmdformats::material
+---
+
+# No one like's spam email.  Thus, we have spam filters built in to our email services that detect and send spam into a deep dark folder where no one can hear it scream.  Let's make a spam detector.
+
+### Let's start by loading the libraries we'll use.
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("readtext")
+library("tm")
+library("dplyr")
+library("ggplot2")
+library("gridExtra")
+library("caTools")
+library("randomForest")
+library("caret")
+
+```
+
+# The first task will be to load sets of spam and ham (non-spam) messages into a dataframe.  
+
+### The data was sourced from:  https://spamassassin.apache.org/old/publiccorpus
+ 
+```{r, include = FALSE}
+spamdir <- "C:\\Users\\blume\\OneDrive\\Desktop\\CUNY MSDS\\Data 607 Data Qcquisition and Management\\Project 4\\spam"
+hamdir <-"C:\\Users\\blume\\OneDrive\\Desktop\\CUNY MSDS\\Data 607 Data Qcquisition and Management\\Project 4\\easy_ham"
+```
+
+### We will begin with two seperate folders containing spam and ham (spamdir and hamdir).  For practicality's sake, the data will be loaded in from a local directory.  This will be different depening on where you have downloaded the data.  The code below loads all of the messages into a dataframe, and classifies them as spam or not.
+```{r}
+#Initialises an empty dataframe
+spamhamdocs <- data.frame(body = character(), is_spam = logical(), stringsAsFactors = FALSE)
+
+#Returns a list of file names for all of the files in the folder where we keep the spam emails
+filenames <- list.files(spamdir)
+
+#Populates the dataframe with the spam messages, and lables them spam
+i = 0
+while (i < length(filenames)) {
+  i = i+1
+  spamhamdocs[nrow(spamhamdocs) + 1,1] <- suppressWarnings(readtext(paste0(spamdir,"\\",filenames[i])))[2]
+  spamhamdocs[nrow(spamhamdocs),2] <- TRUE
+}
+
+#Populates the dataframe with the ham messages, and lables them as not spam (same as above)
+filenames <- list.files(hamdir)
+i = 0
+while (i < length(filenames)) {
+  i = i+1
+  spamhamdocs[nrow(spamhamdocs) + 1,1] <- suppressWarnings(readtext(paste0(hamdir,"\\",filenames[i])))[2]
+  spamhamdocs[nrow(spamhamdocs),2] <- FALSE
+  
+}
+
+spamhamdocs[1,1:2]
+```
+
+# Now that we've got our data loaded in, we need to seperate out the words.  For this, we'll create a document term matrix.
+### This is basically a count of what words occur and how many times they occur for each email.
+```{r}
+#We need to get the data into a corpus object; this will first take a vector of the texts from each email (spamham[,1]), interperet it as a vector of documents (VectorSource()), then load it as a corpus object (Corpus()) 
+spamhamcorp <- Corpus(VectorSource(spamhamdocs[,1]))
+
+
+#Now, it needs to be cleaned.  Included in the corpus is a bunch of nonsense related to the email format, which tends to be fairly similar between spam and ham.  Below, it is purged.
+
+spamhamcorp <- spamhamcorp %>%
+  tm_map(content_transformer(tolower)) %>% #Changes all characters to lower case characters
+  tm_map(removeWords, stopwords(kind = "en")) %>% #Removes stop-words (the english ones)
+  tm_map(stemDocument) %>% #applies Porter's stemming algorithm; removes endings (e.g. created, creates -> create)
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) #This line got rid of alot of nonsense related to the email headers
+
+
+#Creates the document term matrix
+spamhamDTM <- DocumentTermMatrix(spamhamcorp) %>%
+  removeSparseTerms(0.99) #We have alot of words (and other nonsense stuff) that just doesn't occur much.  This trims out anything that occurs infrequently.  Values approaching 1 allow sparcer terms to pass.  Even a value of 0.99 filters out about 150,000 terms (mostly nonsense)
+
+#Sticks the result in a dataframe
+spamham <- as.data.frame(as.matrix(spamhamDTM))
+
+#Turns word frequencies into word occurance (e.g. 4->1, 0->0, 1->1)
+spamham[spamham>1] <- 1
+
+#Adds spam status to it.  
+spamham <- cbind(spamhamdocs[,2], spamham)
+colnames(spamham)[1] <- "is.spam"
+
+#Makes factors for all variables
+spamham <- as.data.frame(lapply(spamham, as.factor))
+
+```
+
+# Going forward, we'll need two different datasets: one for training our model, and one for testing it out afterwards.
+### Below, the data will we have is divided between test and training sets.
+### One important note here: I am only going to test one model.  Otherwise one may also include a validation dataset to aid in chosing betwen models/tuning.
+```{r}
+#caTools includes an easy tool for this, which yields a logical vector with random trues and falses under the proportion specified.  One can use that to subset the main dataset
+
+set.seed("1234567890")
+
+set <- sample.split(spamham, SplitRatio = 0.80) 
+train <- spamham[set == TRUE,]
+test <- spamham[set == FALSE,]
+
+
+#Seperates out spam and ham from train
+spam <- subset(train, is.spam == TRUE)
+ham <- subset(train, is.spam == FALSE)
+```
+
+
+
+# So now that we know which terms occur in each document; let's see what some common terms are.
+```{r, fig.height=20}
+
+df <- as.data.frame(colSums(as.data.frame(lapply(spam, as.numeric))[-1]))
+colnames(df) <- "value"
+df$terms <- rownames(df)
+df<- head(as.data.frame(df[order(-df$value),]),30)
+spamplot <- ggplot(df, aes(x = reorder(df$terms, df$value), y = df$value)) + 
+  geom_bar(stat = "identity") +
+  xlab("Term") +
+  ylab("Occurances") +
+  labs(title = "Spam") +
+  coord_flip()
+
+
+df1 <- as.data.frame(colSums(as.data.frame(lapply(ham, as.numeric))[-1]))
+colnames(df1) <- "value"
+df1$terms <- rownames(df1)
+df1<- head(as.data.frame(df1[order(-df$value),]),30)
+hamplot <- ggplot(df, aes(x = reorder(df1$terms, df1$value), y = df1$value)) + 
+  geom_bar(stat = "identity") +
+  xlab("Term") +
+  ylab("Occurances") +
+  labs(title = "Ham") +
+  coord_flip()
+
+grid.arrange(spamplot, hamplot)
+
+```
+
+### It does seem like many of the most common terms are present in both types of email, although in different frequencies.  Let's see if it's enough for the model to distinguish between the two.
+
+# We're going to go with random forest to make the model.  In short, random forest utilizes multiple decision trees to build a model that is more accurate than any one tree could be.
+```{r}
+set.seed("1234567890")
+
+RFmodel <- randomForest(x = train[,-1], y = train[,1], ntree = 200)
+RFmodel
+```
+
+### Easy enough to get the model using this method.  The function that creates the model predicts an error rate of 0.12%, but let's see what it actually is when we use that test data we set aside earlier.
+
+```{r}
+set.seed("1234567890")
+prediction <- predict(RFmodel, test[,-1])
+
+confusionMatrix(prediction, test$is.spam)
+```
+
+### It looks like the model works pretty well.  Using the training dataset, the model was determined to be 99.67% accurate, only mislabling two pieces of ham as spam out of about 600 messages.  
+
+
+##### Some resources I used:
+
+https://stackoverflow.com/questions/57173255/how-to-filter-one-list-by-whether-or-not-it-contains-a-string-from-another
+
+https://cran.r-project.org/web/packages/tm/vignettes/tm.pdf
+
+https://www.r-bloggers.com/how-to-implement-random-forests-in-r/
+
+https://www.guru99.com/r-random-forest-tutorial.html#1
+
+
+
+
