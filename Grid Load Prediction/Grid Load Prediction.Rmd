@@ -46,12 +46,12 @@ library(anchors)
 #### For power demand, we'll be looking at net energy load by hour, for every hour between the beginning of 2010 an the end of 2019.  This corresponds to average energy usage for any given hour, in mega watts (MW).  The vector of date-times, originally as strings, was converted to datetime-POSIXct format.
 ```{r, fig.width=15}
 #Reads the file
-energy <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/data/master/energyPJM/hrl_load_2010-2020.csv", stringsAsFactors = FALSE)
+energy <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Grid%20Load%20Prediction/data/hrl_load_2010-2020.csv", stringsAsFactors = FALSE)
 
 #Changes the datetime strings to datetime objects
 energy$datetime <- as.POSIXct.default(energy$datetime_beginning_ept, format = "%m/%d/%Y %I:%M:%S %p")
 
-#Removes a few variables that aren't really relevant, like region (I purposefully downloaded all of the same region), 'is.verified' (by the distribution company; most of it is), and the origional date-time strings (we're gonna use the variable we just made, which is EPT)
+#Removes a few variables that aren't really relevant, like region (I purposefully downloaded all of the same region), 'is.verified' (by the distribution company; most of it is), and the original date-time strings (we're gonna use the variable we just made, which is EPT)
 
 energy[,c(1:6,8)] <- NULL
 
