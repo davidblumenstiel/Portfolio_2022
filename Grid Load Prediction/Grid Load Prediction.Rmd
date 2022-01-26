@@ -1,0 +1,359 @@
+---
+title: 'Energy Demand:                                                                                                             Grid
+  Load, Time, and Precipitation'
+author: "David Blumenstiel"
+date: "4/24/2020"
+output:
+  rmdformats::material: default
+  '': default
+---
+
+
+# Abstract
+
+#### The objectives of this project were to discover trends in power-load on an electrical grid over time, and to determine if rain had any noticeable effect on load.  The region focused on was eastern Virginia.  Power data was sourced from PJM in .csv format, and weather data was sourced from NOAA as a text file.  Data preparation was conducted by loading all relevant data into data-frame objects; there were 10 years worth of observations (2010-2019).  Power demand was observed to behave cyclically over time, with high load occurring in summer and winter, and low load occurring in spring and autumn.  Furthermore, daily cycles were also observed for each season, in which power usage tended to be higher during the day, with seasonal dependent peaks, and lows consistently occurring around 2:00AM.  Sinusoidal models  were constructed to predict load over time, with and without rain as a variable.  The time only model had an R^2 of 0.473, and the time and rain model had an R^2 0.476; both models had p-values approaching 0.  There was a slight improvement in the model which considered rain, but not enough to determine if rain has any impact on load.
+
+# Introduction
+
+#### Energy isn't used consistently.  Demand will change depending on the time of day, time of year, and other factors.  Predicting energy demand is of great interest to grid operators and others involved in electrical infrastructure.  As such, there are models to help forecast power requirements, which take several different variables into account.  It's well known that time of day and season factor into energy demand, but it is less clear what impact percipitation has.
+
+#### In this project, we will be making models to forecast load over a grid.  The questions that will be addressed here are:
+##### 1. How does energy-load on a grid behave over time.
+##### 2. Does precipitation affect load.
+
+#### We will answer these questions by constructing two models: one that uses time to predict energy demand, and one that uses both time and percipitation to predict energy demand.  If the later model is significantly better than the first, we can conclude that percipitation is a useful predictor for energy demand. 
+
+
+# Loading and Tidying the Data
+
+#### Before we do anything, we need to load our data and the libraries we'll be using.
+
+```{r setup, message=FALSE}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(anchors)
+```
+
+
+#### Energy data was gathered from PJM's dataminer2 tool, under 'Hourly Load: Metered'. 
+##### On a side note: these guys have a ton of great public data pertaining to energy within their region.  Everything from types of energy generation, to energy pricing.  https://dataminer2.pjm.com/
+
+#### Climate and power-usage likely to be strongly related to each other, as much of the power generated tends to go towards heating and cooling.  Thus, to do the analysis properly, it would be best to narrow down the area in question to one region.  So for this project, we will only be looking for relationships within the eastern 2/3'rds Virginia, which has the advantage of being PJM's only southern market region, allowing for easy segregation from the rest of their data.  Meteorological data is easy to access, and can be chosen from weather stations within that region. 
+
+#### For power demand, we'll be looking at net energy load by hour, for every hour between the beginning of 2010 an the end of 2019.  This corresponds to average energy usage for any given hour, in mega watts (MW).  The vector of date-times, originally as strings, was converted to datetime-POSIXct format.
+```{r, fig.width=15}
+#Reads the file
+energy <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/data/master/energyPJM/hrl_load_2010-2020.csv", stringsAsFactors = FALSE)
+
+#Changes the datetime strings to datetime objects
+energy$datetime <- as.POSIXct.default(energy$datetime_beginning_ept, format = "%m/%d/%Y %I:%M:%S %p")
+
+#Removes a few variables that aren't really relevant, like region (I purposefully downloaded all of the same region), 'is.verified' (by the distribution company; most of it is), and the origional date-time strings (we're gonna use the variable we just made, which is EPT)
+
+energy[,c(1:6,8)] <- NULL
+
+#What's the data look like
+head(energy)
+#Summary statistics
+summary(energy$mw)
+#Histogram
+hist(energy$mw, main = "Hourly Grid Load", xlab = "Load (MW)")
+
+
+```
+
+##### Seems slightly right tailed to me, which makes sense (we'll get into why later).
+
+#### Now, let's load in our meteorological data from NOAA, which provides extensive climate records https://www.ncdc.noaa.gov/cdo-web/.  We'll focus on weather stations in eastern Virginia, which will align both data-sets geographically.  
+
+#### The data originates in a text file, so we'll need to do some cleaning before we can analyze.
+##### As a side note: this data is also available in csv format.  That's as much a challange as text can be though!
+##### The text file is spaced strangely, so we'll handle it with some loops and an else-if.  
+```{r}
+# Importing the raw file, and initializing an empty data frame
+path <- "https://raw.githubusercontent.com/davidblumenstiel/data/master/weatherNOAA/weather.txt"
+
+x <- read.delim(path, stringsAsFactors = FALSE)
+
+weather <- data.frame(matrix(ncol = 19))
+
+
+
+# There are more elegant ways to do this, but nothing quite as entertaining
+i = 2
+while (i < nrow(x)) {
+  
+  split = strsplit(x[i,], "    ")[[1]]
+  
+  j = 1
+  while (j < length(split)) {
+    
+    buff = split[j]
+    
+    if (buff == "") {
+      
+      j = j + 1
+      
+    }
+    
+    else {
+      
+      weather[i - 1,j] <- buff
+      
+      j = j + 1
+      
+    }
+    
+  }
+  
+  i = i + 1
+  
+}
+
+# Further straightening
+
+i = 0
+while (i < nrow(weather)) {
+  i = i + 1
+  
+  if (is.na(weather[i,7]) == FALSE) {
+
+    weather[i,8:21] <- weather[i,7:20]
+    
+  }
+  
+  else if (is.na(weather[i,8]) == TRUE) {
+    
+    weather[i,8:21] <- weather[i,9:22]
+    
+  }
+  
+}
+
+# Now we need to seperate out the dates from other information we dont need
+
+weather$date <- stringr::str_extract(weather[,8], '\\d{8}')
+
+
+# Getting rid of everything we won't need (keeping station name, date, percipitation and snow)
+weather <- weather[,c(1,10,12,26)]
+
+colnames(weather) <- c("Station", "Rain_mm", "Snow_mm", "Date")
+
+# The text file represents missing data as -9999.  This changes those to NA.
+# One note: the data cleaning thus far has introduced some NA's into the dataframe, but those occur where -9999s would have occured
+weather <- replace.value(weather, names = colnames(weather), from = "-9999", to = NA) # Handy function from 'anchors'
+weather <- replace.value(weather, names = colnames(weather), from = "   -9999", to = NA)
+weather <- replace.value(weather, names = colnames(weather), from = "  -9999", to = NA)
+weather <- replace.value(weather, names = colnames(weather), from = " -9999", to = NA)
+
+# Setting the data types
+
+weather$Rain_mm <- as.numeric(weather$Rain_mm)
+weather$Snow_mm <- as.numeric(weather$Snow_mm)
+weather$Date <- as.POSIXct(weather$Date, format = "%Y%m%d")
+
+```
+
+#### Because we're looking at the eastern part of the state as a whole, we should average the precipitation data by station and date.  Luckily, there's only one recording per station per day at max.  So we can simply group by the day, and average.
+
+```{r, fig.width=15}
+weather <- weather %>%
+  group_by(Date) %>%
+  summarise(Rain_mm = mean(Rain_mm, na.rm = TRUE), Snow_mm = mean(Snow_mm, na.rm = TRUE))
+
+#Had one extra day (Jan-1-2020).  Removed it to allign with energy data
+
+weather <- weather[c(1:3652),]
+
+head(weather)
+summary(weather)
+par(mfrow=c(1,2))
+hist(weather$Rain_mm, main = "Daily Rain", xlab = "Rain (mm)")
+hist(weather$Snow_mm, main = "Daily Snow", xlab = "Snow (mm)")
+```
+
+##### Now that the weather-data preparation is done, what we're left with the mean precipitation (snow and rain separately) for each day between the beginning of 2010 and end of 2019 for the eastern 2/3 of Virginia (the same area for which we have energy data). 
+
+##### As one might expect, rain and snow are not normally distributed; it's usualy not percipitating, and thus most days are not going to have any readings.
+
+ 
+# Initial Investigation: Energy Usage
+
+#### For starters, let's see what power usage over the last 10 years looks like.
+```{r, fig.width = 15}
+ggplot(energy, aes(x = datetime, y = mw)) + geom_step(color="blue") +
+  scale_x_datetime(date_breaks = "1 year") +
+  labs(title = "10 Year Energy Load Hourly Average", x = "Date", y = "MW")
+```
+
+##### It seems to have followed the same pattern for the most part, and risen slightly overall.  Power usage tends to start off high in the winter (heating), drop low in the spring, raise to it's highest points in the summer (energy hungry AC) and drop again in autumn.  This phenomenon is pretty straight forward, and widely known.  If anything, it goes to validate our data, and explain why the data is slightly right skewed (two-low use months, one med use month, one high use month).
+
+##### There's a lot going on in the above graph though; let's see if we can break it down a bit further.
+
+#### Below, we look at just a few days worth of power usage from every month, to try to understand daily trends more.  We'll focus on the first few days of every three months for 2015 (which should represent seasons, in a quick and general sense).
+```{r, fig.height=10, fig.width = 15}
+selectdates <- energy[as.Date(energy$datetime) >= "2015-01-01" & as.Date(energy$datetime) <= "2015-01-05",]
+January <- ggplot(selectdates, aes(x = datetime, y = mw)) + 
+  geom_line(color="blue", size=1.0) +
+  scale_x_datetime(date_breaks = "12 hours") +
+  labs(title = "January", x = "Date Time", y = "MW")
+
+selectdates <- energy[as.Date(energy$datetime) >= "2015-04-01" & as.Date(energy$datetime) <= "2015-04-05",]
+April <- ggplot(selectdates, aes(x = datetime, y = mw)) + 
+  geom_line(color="green", size=1.0) +
+  scale_x_datetime(date_breaks = "12 hours")+
+  labs(title = "April", x = "Date Time", y = "MW")
+
+selectdates <- energy[as.Date(energy$datetime) >= "2015-07-01" & as.Date(energy$datetime) <= "2015-07-05",]
+July <- ggplot(selectdates, aes(x = datetime, y = mw)) + 
+  geom_line(color="red", size=1.0) +
+  scale_x_datetime(date_breaks = "12 hours")+
+  labs(title = "July", x = "Date Time", y = "MW")
+
+selectdates <- energy[as.Date(energy$datetime) >= "2015-10-01" & as.Date(energy$datetime) <= "2015-10-05",]
+October <- ggplot(selectdates, aes(x = datetime, y = mw)) + 
+  geom_line(color="brown", size=1.0) +
+  scale_x_datetime(date_breaks = "12 hours")+
+  labs(title = "October", x = "Date Time", y = "MW")
+
+gridExtra::grid.arrange(January, April, July, October, nrow = 4)
+
+```
+
+#### The first apparent trend is how energy usage dips around 1:00-2:00 in the morning.  No more evident is that than in the July figure, (coldest time of day is early morning, requires less cooling).  The trend holds the same in winter, even through the coldest part of the day, as people tend to be too busy sleeping to use as much energy at night (aside from on heating).
+
+##### I suspect heating has less an effect on energy than cooling, due to the prevalance of non-electric heating systems, whereas cooling is almost universially electric.  This could explain the difference in the number of peaks between January and July: misc daily indoor usage (running dishwashers, heating water, etc) could be the main driving factor in winter, while air-conditioning is the main factor in summer.
+
+#### Another interesting trend one can see in the January and April plots (and less so, October) is the energy usage peaking in the morning and in the evening.  Maybe people cooking/showering/at home?
+
+#### Looking at the Y axis scale alone, we can further validate the observations about seasonal energy usage made before: high in winter, higher in summer, lowest in spring and autumn.  
+
+
+#### Understanding daily and seasonal variations will be important later on in the analysis, as we'll have to take it into account when trying to solve for differences related to figure out weather's contribution to energy usage.
+
+##### Speaking of which, what's our weather data look like?
+
+# Initial Investigation: Weather
+
+#### Let's see what precipitation looked like in Virginia over the past 10 years.
+
+```{r, fig.width=15}
+ggplot(weather, aes(Date)) + 
+  geom_step(aes(y = Rain_mm, color="Rain")) +
+  geom_step(aes(y = Snow_mm, color="Snow")) +
+  scale_color_manual(values=c("Rain"="blue","Snow"="red")) +
+  scale_x_datetime(date_breaks = "1 year") +
+  labs(title = "10 Year Precipitation", x = "Date", y = "MM Snow/Rain", colour = "Precipitation")
+```
+
+#### Rain seems to occur fairly consistently, while snow tends to occur in bursts (presumably in winter).  That's about what we would expect; rain in that climate tends to be fairly consistent through the year, and high temperatures are not conductive to snow.
+
+#### Becuase snow tends to occur at the same time each year, it is colinear with time, and thus not suitable for our analysis.  
+
+#### Let's zoom in on 2015 to see if there's anything else going on.
+
+```{r, fig.width=15}
+ggplot(weather[as.Date(weather$Date) >= "2015-01-01" & as.Date(weather$Date) <= "2015-12-31",], aes(Date)) + 
+  geom_step(aes(y = Rain_mm, color="Rain")) +
+  geom_step(aes(y = Snow_mm, color="Snow")) +
+  scale_color_manual(values=c("Rain"="blue","Snow"="red")) +
+  scale_x_datetime(date_breaks = "1 month") +
+  labs(title = "2015 Precipitation", x = "Date", y = "MM Snow/Rain", colour = "Precipitation")
+```
+
+#### One detail we can observe here is: if it rains, it tends to do so over multiple days.  
+
+#### Now that we have a clearer idea of energy and weather behave over time, we're ready to start modeling.
+
+# Modeling Preparation
+
+#### Let's come up with a model that fits energy load based on date and time.  First, we'll do some transformations so we can do a linear regression.  For simplicity, and to match up with the weather data, we'll start by averaging energy data for each day.  
+
+```{r, fig.width=15}
+energy <- energy %>%
+  mutate(date = as.Date.character(datetime)) %>%
+  group_by(date) %>%
+  summarise(MW = mean(mw, na.rm = TRUE))
+
+ggplot(energy, aes(x = as.POSIXct.Date(date), y = MW)) + geom_step(color="blue") +
+  scale_x_datetime(date_breaks = "1 year") +
+  labs(title = "10 Year Energy Load Daily Average", x = "Date", y = "MW")
+```
+
+#### Much less busy.  What's left now is only seasonal variation for the most part.
+
+
+
+#### One last thing: let's join both data frames (weather and energy), and get rid of the intermediary variables.
+
+```{r}
+df <- cbind(energy, weather)
+
+#Scraps the now redundant date variable
+df[3] <- NULL
+```
+
+
+
+# Modeling
+
+#### Using weather data alone to model energy is not likely to be terribly accurate.  But, we can add weather data to an existing model see if it improves the model.  If it does, then we can use weather to help predict energy usage.
+
+#### Let's start by making a model that only uses date to predict energy.  We should be able to do so because, as seen before, time has a fairly large impact on energy usage.  A sinusoidal model seems appropriate.  
+```{r, fig.width=15}
+# Becuase energy over time acts like a wave, we can use angular terms to define it within the model
+# Each cycle is 365.25 days (i.e. 1 year)
+# 4pi becuase we're going for 2 cycles per year, as both summer and winter are high points, while autumn and spring are low
+# Also added the plain date variable to account for macro-changes over time
+term1 <- sin(4*pi * as.numeric(df$date)/365.25) 
+term2 <- cos(4*pi * as.numeric(df$date)/365.25)
+model <- lm(MW ~  date + term1 + term2, data = df)
+
+plot(df$MW ~ df$date, col = "black", xlab = "Date", ylab = "Average Daily Load (MW)")
+lines(fitted(model) ~ df$date, col = "red", lwd = "2")
+
+summary(model)
+```
+
+#### As seen in the above plot, the regression takes the shape of a wave.  Term1 and term2 shown in the regression summary are angular components (see the code).  While it is highly significant (p - value is nearly 0), it only accounts for about 47.3% of the variability observed (R-squared).  
+
+##### This is probably not accurate enough to get a sense of whether or not weather plays a role in energy load, but lets see what happens anyways.
+
+
+#### Below is the model which takes weather into account.
+
+##### Pretty much the same thing as the last model, but with an additional term for rain.
+
+##### We're going to leave snow out, becuase it is colinear with time.
+```{r}
+modelImproved <- lm(MW ~ date + term1 + term2 + Rain_mm, data = df)
+summary(modelImproved)
+```
+
+##### Only performs slightly better with 47.6% of variability accounted for.
+
+
+# Discussion/Conclusions
+
+#### The difference in R-squared values between the two models (Date Only: 0.473,  With Rain: 0.476) was 0.003; the model which took rain into account was an additional 0.3% more accurate. Given the low accuracy of the model predicting energy load by date alone (47.3%), I'm going to conclude that if rain does have an effect on grid load, then this did not discover as such.  The base model (no rain) was not accurate enough to observe small differences as would be due to rain.
+
+#### I was happy with time being as much of a predictor of energy load as it was.  However, one thing to keep in mind is that this model only pertains to eastern Virginia.  As date is pretty much a proxy for temperature, a change in climate likely necessitates a new model.
+
+#### Out of curiosity, I also tried a model which included snow; it had a higher R-squared of 0.493.  I suspect though, that the difference in R-squared here is mostly do to the fact that snow is only going to occur in colder months, which is why I didn't include it as a variable (it's colinear with date).  I also suspect that the difference between the rain and no rain models may also have had more to do with whatever slight association rain may have with season, even though rain in Virginia is supposed to be fairly evenly distributed.
+
+#### Further improvements to the model could be made by implementing ways to account for the difference between seasons better.  My models technically considered winter and summer to be equal, but having a more complicated model to account for the lower energy use in winter than summer would further increase accuracy.  One could also overhaul the model in attempt to have it predict energy load at any given hour by implementing methods to account for daily variation in additional to seasonal variations.  And although I used date as the primary predictor of energy load, I know temperature would be a better predictor (at least for seasonal differences), as much power-usage goes towards heating and cooling. 
+
+
+
+
+
+
+
+
+
+
+
