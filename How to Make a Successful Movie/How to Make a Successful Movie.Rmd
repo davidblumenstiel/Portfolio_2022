@@ -1,0 +1,214 @@
+---
+title: "How to Make a Successful Movie"
+author: "David Blumenstiel"
+date: "4/28/2020"
+output: rmdformats::material
+---
+
+
+
+
+# Introduction
+
+#### I'm sure movie executives have long debated one topic in particular: What makes a movie great?   Is it the actors?  The story?  The art form? No.
+
+#### It's Profit of course!
+
+#### For this project, we'll try to figure out what makes a movie great (at making money.)
+
+
+# Data
+
+
+```{r setup, message=FALSE, include=FALSE}
+library(ggplot2)
+library(stats)
+library(GGally)
+library(gridExtra)
+```
+
+#### The data comes from The Internet Movie Data Base (https://www.themoviedb.org/), which was conveniently uploaded to Kagle (https://www.kaggle.com/tmdb/tmdb-movie-metadata/discussion).  Each observation is a movie, and contains information such as release date, budget, revenue, popularity, run-time, and an average rating.  We will be examining the relationship between revenue and each other variable.
+
+#### This is going to be an observational study, as we are looking at data that already exists and are not performing any treatments.  The scope of inference should include all English speaking, American movies that have an TMDB profile.  This likely won't include movies that were not released in theaters or otherwise widely distributed.  As far as I know, this should be a fairly random sample of movies, but I cannot speak to whatever biases went into the selection.  
+
+#### We will not likely be able to establish causality with this data.  There are many other variables (such as the type of film, season it was released, etc) which may also weigh into revenue, and which may be related to the variables included in the data.  We may, however, use the data to predict a movie's financial success to some extent.
+
+#### There were several issues with the data, such as missing information defaulting to 0 values, or different units of measurement.  This resulted in things like movies with run-times of 0, revenues/budgets reported in millions or thousands, different currencies, etc.   Below, the data-set is loaded in, and observations that were likely faulty are removed.
+
+
+```{r}
+#Loads the data off github
+movies <- read.csv('https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/How%20to%20Make%20a%20Successful%20Movie/data/tmdb_5000_movies.csv', stringsAsFactors = FALSE)
+
+
+#Removes non-english speaking movies to narrow down the currencies
+movies <- movies[movies$original_language == "en",]
+
+#Takes out observations which have a budget of 1000 or less (gets rid of some suspect observations, and those reporting in millions or thousands of dollars)
+movies <- movies[movies$budget > 1000,]
+
+#Takes out observations which have a revenue of 100 or less 
+movies <- movies[movies$revenue > 100,]
+
+#Takes out observations which don't have a runtime (technically not a movie at that point)
+movies <- movies[movies$runtime > 0,]
+
+movies$release_date <- as.Date(movies$release_date) 
+
+#Trims out the variables we aren't interested in
+movies <- movies[,c(1,9,12,13,14,19)]
+```
+
+
+#### That takes care of basic cleaning, but there is still one other major problem with the data: price inflation.  The data-set now contains movies going back to 1916, and the value of currencies have dropped considerably since then.  For example, the data-set lists a revenue of about $400 million for 'Gone With the Wind'; this would equate to about billions in today's money.
+
+#### Luckily, there's the 'priceR' package, which will easily inflate/deflate currencies to any given date.  Below, the budgets and revenues are translated into their 2019 equivalent.  A rate of 3.71% a year was used, which is approximately the average inflation rate from 1939 to 2019.
+
+```{r}
+rate = 3.71
+library(priceR)
+movies$budget.adjusted <- adjust_for_inflation(movies[, 1], as.numeric(substr(movies[,3], start = 1, stop = 4)), extrapolate_past_method = "rate", past_rate = rate,  "US", to_date = 2019)
+
+movies$revenue.adjusted <- adjust_for_inflation(movies[, 4], as.numeric(substr(movies[,3], start = 1, stop = 4)), extrapolate_past_method = "rate", past_rate = rate,  "US", to_date = 2019)
+```
+
+# Exploratory data analysis
+
+#### Now that we have clean data, let's do some explorations.
+
+
+
+#### Below are summary statistics for the revenue data.
+```{r}
+summary(movies$revenue.adjusted)
+```
+
+#### Below are summary statistics for the budget data.
+
+```{r}
+summary(movies$budget.adjusted)
+```
+
+#### Below are histograms of inflation adjusted movie revenues and budgets.  Lower budget/revenue movies are much more common in this data-set than are high ones.  However, the scale is skewed by the presence of super high cost and earnings movies (some costing hundreds of millions to make, others earning billions).  The distribution of budgets and revenues comes out a bit more clearly on a log scale, but still tend to be right skewed.  Popularity is right skewed; most movies are not popular, while a few are very popular.  Run-time is somewhat normally distributed around 100-110 mins.  There are also much more movies produced after the late 20th century than before.
+
+```{r, fig.height=15, fig.width=15}
+
+
+grid.arrange(
+
+  ggplot(movies, aes(x = revenue.adjusted)) + 
+    geom_histogram(fill = "green", color = "black") +
+    xlim(0,3000000000) +
+    labs(title = "Histogram of Movie Revenue") +
+    xlab(label = "Revenue (USD)") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = revenue.adjusted)) + 
+    geom_histogram(fill = "green", color = "black") + 
+    scale_x_log10() +
+    labs(title = "Histogram of Movie Revenue, Log Scale") +
+    xlab(label = "Revenue (USD)") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = budget.adjusted)) + 
+    geom_histogram(fill = "blue", color = "black") +
+    labs(title = "Histogram of Movie Budget") +
+    xlab(label = "Budget (USD)") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = budget.adjusted)) + 
+    geom_histogram(fill = "blue", color = "black") + 
+    scale_x_log10()+ 
+    geom_histogram(fill = "blue", color = "black") +
+    labs(title = "Histogram of Movie Budget, Log Scale") +
+    xlab(label = "Budget (USD)") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = runtime)) + 
+    geom_histogram(fill = "red", color = "black") +
+    labs(title = "Histogram of Movie Run-Time") +
+    xlab(label = "Run-Time") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = popularity)) + 
+    geom_histogram(fill = "yellow", color = "black") +
+    labs(title = "Histogram of Movie Popularity") +
+    xlab(label = "Popularity") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = vote_average)) + 
+    geom_histogram(fill = "purple", color = "black") +
+    labs(title = "Histogram of Movie Vote Average") +
+    xlab(label = "Vote Average") +
+    ylab( label = "Frequency") ,
+  
+  ggplot(movies, aes(x = release_date)) + 
+    geom_histogram(fill = "orange", color = "black") +
+    labs(title = "Histogram of Movie Release Date") +
+    xlab(label = "Release Date") +
+    ylab( label = "Frequency") ,
+  
+  ncol = 2
+
+)
+```
+
+#### Below are scatter-plots of revenue against budget, one on a regular scale, one on a log scale.  We can see that a higher budget does seem to correlate with a higher revenue, as is more evident in the log scale.  Specifically, strength of the correlation is 0.49.
+```{r, fig.width=15}
+grid.arrange(
+  
+  ggplot(movies, aes(revenue.adjusted, budget.adjusted)) +
+    geom_point() +
+    scale_x_log10() + 
+    scale_y_log10() +
+    labs(title = "Revenue vs Budget.  Log Scale") +
+    xlab("Revenue") + 
+    ylab("Budget"),
+  
+  ggplot(movies, aes(revenue.adjusted, budget.adjusted)) +
+    geom_point() +
+    labs(title = "Revenue vs Budget.") +
+    xlab("Revenue") + 
+    ylab("Budget"),
+
+  ncol = 2
+)
+paste0("Correlation Coefficient: ", as.character(round(cor(movies$budget.adjusted, movies$revenue.adjusted),2)))
+```
+
+
+#### There are more variables that may be at play however.  They are all plotted below using a pairs plot.  We can see that some of the strongest correlations are between: revenue and popularity, budget; vote average and budget, run-time; budget and popularity.
+```{r, fig.height=15, fig.width=15}
+ggpairs(movies[,-c(1,4)])
+```
+
+#### It should be noted that run-time may have more of a parabolic relationship to other variables.  However, most variables appear to have fairly linear relationships with revenue; those will be the main variables by which we will attempt to model movie revenue.
+
+# Inference
+
+#### If the goal is to predict revenue, we can attempt to use the variables from before to create a model.  Most variables appear to have slight linear associations with revenue.  The exception may be run-time, which may have more of an parabolic relationship (it's widely believed that a length around 90-120 mins is optimal).  
+
+```{r}
+model <- lm(formula = revenue.adjusted ~ budget.adjusted + popularity + release_date + runtime + vote_average, data = movies)
+summary(model)
+
+hist(model$residuals, breaks = 500, xlim = c(-1000000000,1000000000), xlab = "Residuals")
+```
+
+#### The model above takes all variables into account, and does better than I thought it might, accounting for about 39% of the variation in revenue.  The p-value was almost 0, so the model is highly significant.  Residuals are also normally distributed.  
+
+#### As one might expect, the more money you put into a movie, the more popular it is, and the higher rated it is, the more money it's going to make.  Also interestingly enough, older movies tended to make more than newer movies do, which makes sense as there were much fewer movies (at least in the data set) being made back in time, meaning the movies that were made may have had less competition.  Run-time does not make too much of a difference, but has a slight positive correlation with revenue.  
+
+#### One potential problem with this model is that budget and run-time, vote average and popularity, and release date and popularity may not be truly independent of each-other.  After all, wont longer movies cost more to make, and wouldn't something better rated with less competition be more popular?  
+
+
+# Conclusions
+
+#### I think it would be safe to say that if one wants to make a profitable movie, then it may be helpful to have a larger budget, appeal to the masses (popularity), and get a higher rating (make a good movie?).  Oh, also release it as far back in time as possible.  
+
+#### The model I've made accounts for about 39% of the variation in movie revenue, and is highly significant.  While some of the variables may not be entirely independent of each-other, I think this model can provide good indication of what might drive revenue.  Though, I would be very interested to see the real models film producers actually use to determine which movies to pursue.
+
+# References
+
+#### The Movie Database: https://www.themoviedb.org/
+#### TMDB data-set on Kagle: https://www.kaggle.com/tmdb/tmdb-movie-metadata/discussion
