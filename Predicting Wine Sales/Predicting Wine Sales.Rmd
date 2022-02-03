@@ -1,0 +1,331 @@
+---
+title: "Predicting Wine Sales"
+author: "David Blumenstiel"
+date: "5/8/2021"
+output: rmarkdown::github_document
+  
+  
+---
+
+We will be working with data pertaining to wine and how many cases purchased by wine distributors.  The data includes many characteristics of the wine, including cases sold, pH, the appeal of the label, a taste rating, and more.  The objective is to use the variables to make models which predict the amount of cases sold.
+
+
+
+## Exploratory Data Analysis
+
+First, we load the libraries we'll be using, along with the data
+
+```{r, message=FALSE, warning=FALSE}
+library(corrplot)
+library(caret)
+library(MASS)
+library(pscl)
+```
+
+ 
+```{r}
+train <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Predicting%20Wine%20Sales/data/wine-training-data.csv")
+
+test <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Predicting%20Wine%20Sales/data/wine-evaluation-data.csv") 
+```
+
+
+Let's take a quick peek at the data.
+
+```{r}
+summary(train)
+```
+
+Some initial observations about the data:
+
+Many of the measurements contain observations with negative values.  This could indicate that either someone really screwed up their instrument calibration (unlikely), or that some of these measurements are on some strange scale (not traditional concentration measurements).
+
+There are also some missing values, which may or may not be predictive themselves.
+
+Some of these wines are reported to be extremely acidic, with a decent chunk of them having a pH of 2 or less, which is similar to straight lemon juice.  In addition, some of the pH values are under 0.5, which would be fairly hazardous (i.e. would be equivalent to drinking the acid from a car battery); this brings some of these measurements into question.    
+
+There are several things that could be done to improve the data, but let's first look a bit more at the distribution of and relationships between the variables, starting with some histograms.
+
+
+```{r}
+par(mfrow = c(2,2))
+hist(train$TARGET, breaks = 8)
+hist(as.numeric(train$LabelAppeal))
+hist(as.numeric(train$STARS))
+hist(train$AcidIndex, breaks = 20)
+
+
+```
+
+One thing of note is an overabundance of zeros in the TARGET variable (cases sold), which will likely affect the types of models we'll want later on.  The distributions of the other variables indicate that some values are more common than others.  STARS and LabelAppeal can likely be dealt with as categorical data, while AcidIndex may be count data; AcidIndex seems almost right skewed, but mostly normal (for count data).
+
+For count regression it can be helpful to know how the variance of the response variable compares to the mean. Below, we can see that the variance is somehwat higher than the mean, which means regular Poisson regression might not work as well as somthing that can deal with overdispersion; somthing to keep in mind.
+
+```{r}
+print(paste("variance: ", var(train$TARGET), "        mean: ", mean(train$TARGET)))
+```
+
+
+Let's examine also the relationships between the variables.
+
+
+```{r}
+#Remove the index variable
+train$`ï..INDEX` <- NULL
+test$IN <- NULL
+
+corr <- cor(train, method = "pearson", use = "complete.obs")
+corrplot(corr, method = "square")
+
+```
+
+On the face, there's very little correlation between most variables.  Our most significant correlations are between LabelAppeal, STARS, and TARGET.  LabelAppeal and STARS are somewhat correlated to each-other, but more so to TARGET; these are likely going to be the two most important independent variables in the models.  To a lesser extent, AcidIndex is somewhat negatively correlated to TARGET, and might also play a role.  Also interesting is that AcidIndex has little to do with pH or FixedAcidity; not going to pretend to understand that one.  
+
+Let's further examine the variables, with particular attention paid to LabelAppeal, STARS, AcidIndex, and the dependent variable, TARGET.
+
+One thing that immediately stands out from these histograms is that all of these are discrete data.  LabelAppeal almost looks like it would follow a normal distribution were it continuous data, while STARS and AcidIndex both seems somewhat right skewed in that regard.  The TARGET variable looks like it may be somewhat zero inflated.     LabelAppeal and STARS are both limited, and would probably be be well represented as categorical data.  TARGET is technically unbound, and therefore count data.  I don't know if AcidIndex has any bounds, but I suspect treating it as count data would be appropriate.  
+
+We also have missing values to consider.
+
+```{r}
+lapply(train[,c("TARGET","STARS","LabelAppeal","AcidIndex")], function(x) sum(is.na(x)))
+```
+
+About a quarter of the values in STARS are missing.  After some examination, I suspect missing data here tends to mean fewer cases sold.  Treating STARS as categorical would make it easier to assign the missing data to a category of it's own.  It's also plausible that a high STARS value might mean more expensive wine, and therefore sell less, which is another argument for considering STARS as categorical rather than count.  We'll assign missing STARS values to "<NA>"; a category of their own.
+
+
+## Data Preparation
+
+Not too much data preparation required here.  We do need to transform STARS and LabelAppeal to categorical data, and add an extra category for missing values in STARS.  We'll also split off a validation set to better judge the models.  
+
+```{r}
+set.seed(1234567890)
+
+train$STARS <- addNA(train$STARS)  #Changes STARS to factor and adds <NA> as a class
+train$LabelAppeal <- as.factor(train$LabelAppeal) #Change to factor class
+
+#Same for test set
+test$STARS <- addNA(test$STARS)  #Changes STARS to factor and adds <NA> as a class
+test$LabelAppeal <- as.factor(test$LabelAppeal) #Change to factor class
+
+
+#split off a valiation set
+splitdex <- createDataPartition(train$TARGET, p=0.8, list = FALSE)
+validation <- train[-splitdex,]
+train <- train[splitdex,]
+
+validation_X <- validation[,-1]
+validation_Y <- validation[,1]
+
+```
+
+
+
+## Modeling
+
+### Poisson Regression
+
+A standard for count regression, the Poisson model could work for this, but as we discovered earlier, the target variable is somewhat overdispersed.  Below is a basic Poisson model utilizing the variables discussed previously.
+
+```{r}
+poisson_model <- glm(TARGET ~ STARS + LabelAppeal + AcidIndex, 
+                     data = train,family = "poisson")
+                     
+summary(poisson_model)
+
+poisson_model_predictions <- predict(poisson_model, validation_X, type = "response")
+
+plot(poisson_model_predictions~validation_Y)
+
+qqnorm(residuals(poisson_model), )
+qqline(residuals(poisson_model))
+
+hist(residuals(poisson_model), breaks = 20)
+
+hist(round(poisson_model_predictions), breaks = 20)
+
+```
+
+The model ranks all independent variables used as highly significant.  Residuals look fairly normal, although there is definitely a little deviance from normality when looking the qq-plot of the residuals.  The distribution of the predictions lines up with the distributions of the TARGET variable + 1, which is strange.  This model actually predicts no zeros at all, despite zero being a common value in the data.  I wonder if subtracting 1 from the predictions would make this more accurate.
+ 
+### Quasi-Poisson 
+
+Theoretically, a Quasi-Poisson model might do better for this data because of the overdisperson; let's try one out.
+
+
+```{r}
+
+quasipoisson_model <- glm(TARGET ~ STARS + LabelAppeal + AcidIndex, 
+                          data = train,family = quasipoisson)
+
+summary(quasipoisson_model)
+
+quasipoisson_model_predictions <- predict(quasipoisson_model, validation_X, type = "response")
+
+plot(poisson_model_predictions~validation_Y)
+
+qqnorm(residuals(quasipoisson_model), )
+qqline(residuals(quasipoisson_model))
+
+hist(residuals(quasipoisson_model), breaks = 20)
+
+hist(round(quasipoisson_model_predictions), breaks = 20)
+
+```
+
+Very little difference compare to the regular Poisson model.
+
+
+
+### Negative Binomial
+
+Ordinarily, I'd say negative binomial might be one of the better choices for modeling a dataset like this given the overdispersion.  However, I'm pretty sure this is not working correctly.
+
+```{r}
+#Throws an error I couldnt get around
+#negative_binomial_model <- glm.nb(TARGET ~ STARS + LabelAppeal + AcidIndex, data = train,
+#                                  control = glm.control(maxit = 5000, trace = TRUE),
+#                                  link = log)
+
+negative_binomial_model <- glm.nb(TARGET ~ STARS + LabelAppeal + AcidIndex, 
+                                  data = train)
+summary(negative_binomial_model)
+
+negative_binomial_model_predictions <- predict(negative_binomial_model, 
+                                               validation_X, type = "response")
+
+plot(negative_binomial_model_predictions~validation_Y)
+
+qqnorm(residuals(negative_binomial_model), )
+qqline(residuals(negative_binomial_model))
+
+hist(residuals(negative_binomial_model), breaks = 20)
+
+hist(round(negative_binomial_model_predictions), breaks = 20)
+
+
+```
+
+Looks the same as the regular Poisson model.  I'm fairly sure this is not working correctly.  I was able to get past an "iteration limit reached" error by setting a higher limit, but the model broke after that, and I'm not sure why (after much researching).  
+
+
+### Zero Inflated Poisson Model
+
+Zero inflated Poisson regression is basically a combination of Poisson regression and logistic model, where the logistic part tries to determine if the count is 0 or not.  Should do well considering the amount of zeros in the data.
+
+```{r}
+
+zi_poisson_model <- zeroinfl(TARGET ~ STARS + LabelAppeal + AcidIndex, 
+                             data = train, dist = "poisson")
+
+summary(zi_poisson_model)
+
+zi_poisson_model_predictions <- predict(zi_poisson_model, 
+                                        validation_X, type = "response")
+
+plot(zi_poisson_model_predictions~validation_Y)
+
+qqnorm(residuals(zi_poisson_model), )
+qqline(residuals(zi_poisson_model))
+
+hist(residuals(zi_poisson_model), breaks = 20)
+
+hist(round(zi_poisson_model_predictions), breaks = 20)
+
+```
+
+Residuals here are pretty normally distributed, albeit with a heavy right tail as evidenced by the qq-plot.  This model predicts zeros, but still not nearly as much as occur within the data.  Better than none though
+
+
+### Hurdle Poisson model
+
+Nothing is predicting zero much, and negative binomials are breaking.   Let's try a hurdle model and see if it works well.
+
+```{r}
+hurdle_model <- hurdle(TARGET ~ STARS + LabelAppeal + AcidIndex, 
+                       data = train, dist = "poisson", zero.dist = "binomial")
+
+summary(hurdle_model)
+
+hurdle_model_predictions <- predict(hurdle_model, validation_X, type = "response")
+
+plot(hurdle_model_predictions ~ validation_Y)
+
+qqnorm(residuals(hurdle_model), )
+qqline(residuals(hurdle_model))
+
+hist(residuals(hurdle_model), breaks = 20)
+
+hist(round(hurdle_model_predictions), breaks = 20)
+```
+
+Very similar outcome to the zero inflated Poisson model.  Heavy right tail on the the qq-plot, predicts zeros but still not as much as occur within the data.  
+
+
+## Model Selection
+
+Because we used a holdout set, we can compare model performance on the validation set.  To do this, we'll use RMSE, AIC, BIC, and the sum of the absolute differences between predicted sales and actual sales.
+
+
+```{r}
+Models = c("Poisson", "Quasi-Poisson","Negative Binomial", "Zero Inflated Poisson", "Hurdle")
+
+RMSE = c(RMSE(poisson_model_predictions, validation_Y),
+         RMSE(quasipoisson_model_predictions, validation_Y),
+         RMSE(negative_binomial_model_predictions, validation_Y),
+         RMSE(zi_poisson_model_predictions, validation_Y),
+         RMSE(hurdle_model_predictions, validation_Y))
+
+.AIC = c(poisson_model$aic,
+        quasipoisson_model$aic,
+        negative_binomial_model$aic,
+        AIC(zi_poisson_model),
+        AIC(hurdle_model))
+
+BIC = c(BIC(poisson_model),
+        BIC(quasipoisson_model),
+        BIC(negative_binomial_model),
+        BIC(zi_poisson_model),
+        BIC(hurdle_model))
+
+Sum_Absolute_Prediction_Diffential = c(sum(abs(poisson_model_predictions - validation_Y)),
+                              sum(abs(quasipoisson_model_predictions - validation_Y)),
+                              sum(abs(negative_binomial_model_predictions - validation_Y)),
+                              sum(abs(zi_poisson_model_predictions - validation_Y)),
+                              sum(abs(hurdle_model_predictions - validation_Y)))
+
+
+
+
+data.frame(Models, RMSE, .AIC, BIC, Sum_Absolute_Prediction_Diffential)
+
+
+```
+
+One important thing of note here is that all results are very similar, especially AIC.  The best model here is likely the hurdle Poisson model, with has the lowest RMSE, BIC, and the second closest actual predictions as measured.  The zero inflated Poisson model and hurdle model are both predict zeros, which may have something to do with their better performance.  When we look at the sum of the absolute errors between predicted and actual sales in cases    (Sum_Absolute_Prediction_Differential), we see that the hurdle Poisson and zero inflated Poisson models predict are about 130 cases closer than the others, which means those models are more practical.
+
+As for choosing a model, it's something of a tossup between the hurdle Poisson and zero inflated Poisson models.  We'll go with the hurdle Poisson model for its slightly lower RMSE than than the zero inflated Poisson model.  Below we make predictions on the testing set and save them locally.
+
+```{r}
+predictions <- data.frame(Predicted_Cases_Sold = round(predict(hurdle_model, test)))
+
+write.csv(predictions, "predictions.csv", row.names = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
