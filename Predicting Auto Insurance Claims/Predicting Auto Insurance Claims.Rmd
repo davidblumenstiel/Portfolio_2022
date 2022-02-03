@@ -1,0 +1,402 @@
+---
+title: "Predicting Auto Insurance Claims"
+author: "David Blumenstiel"
+date: "4/19/2021"
+output: output=github_document
+---
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+# Set so that long lines will be wrapped for pdfs:
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=80), tidy=TRUE)
+```
+
+## Introduction
+
+Here, we are presented with a dataset of approximately 8000 records pertaining to those who have purchased an auto insurance policy from a company (un-named).  Each record contains information about a customer, whether or not they have submitted a claim for an accident, and how much the claim was for (if they had submitted one).  Also included in these records are various other bits of personal information, such as income, sex, education, etc.  Our task is to use this data to create a model capable of predicting whether or not a customer will have filed a claim, and to predict how much the claim is for.
+
+
+
+## Data Import, Preparation, and Exploration
+
+First, let's import the libraries and training data, and take a quick look.
+
+
+```{r,message=FALSE,warning=FALSE}
+library(tidyr)
+library(dplyr)
+library(caret)
+library(corrplot)
+library(pROC)
+```
+
+```{r}
+#Data import
+#Some of the missing data is written as blank instead of NA.  na.strings takes care of that
+raw <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Predicting%20Auto%20Insurance%20Claims/data/insurance_training_data.csv", na.strings=c(""," ")) 
+
+summary(raw)
+
+head(raw)
+
+```
+
+There's some missing data, and some factors that should be numeric and vice-versa.  Some of the data that should be numeric also contains dollar-signs and commas, which need to be removed prior to conversion to numeric.  We'll make a function to handle this.
+
+Another thing of note is that the response variable TARGET_FLAG is unbalanced; only about 26% of the data represents crash claims.
+
+Below the dataset is prepared for better analysis.  The index is removed, data types are changed appropriately, and missing values are imputed.  This preparation is written as a function, which will later be applies to the evaluation dataset (which comes as a seperate, but similar file).
+
+```{r}
+fetch_and_prep <- function(url) { #Will take a url and return the prepaired dataset
+  
+  #Some of the missing data is written as blank instead of NA.  na.strings takes care of that
+  df = read.csv(url, na.strings=c(""," "))
+  
+  #Scrap the index variable
+  df$INDEX <- NULL
+  
+  #Change to factor where appropriate
+  df[c("KIDSDRIV","HOMEKIDS","CLM_FREQ")] = lapply(df[c("KIDSDRIV","HOMEKIDS","CLM_FREQ")],factor)
+  
+  #Change to numeric where appropriate by first converting to characters, then removing '$' and ',', and then converting to numeric
+  df[c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM")] = lapply(df[c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM")], function(x) as.numeric(gsub('[,]','',gsub('[$]','',as.character(x)))))
+  
+  #Adds some more levels to factors so train and test sets have the same categorical variables
+  if( "4" %in% levels(df$KIDSDRIV) == FALSE) {  #from: https://stackoverflow.com/questions/40034750/how-to-check-if-a-factor-variable-has-only-the-levels-i-want
+    levels(df$KIDSDRIV) = c(levels(df$KIDSDRIV),"4")
+  }
+  
+  #############
+  #NA Imputation
+  
+  #Definitely up for debate as to how to handle missing data here.  Here's one take:
+  #Could also definitely use regression to impute alot of this (would probably be the better option), but this is less complex
+  
+  #Income: will set to median of job type.  If job is also NA, it assumes no job and income is 0
+  levels(df$JOB) = c(levels(df$JOB),"Unemployed","Unlisted") #adds some more job options
+  incomes = aggregate(INCOME~JOB, df, median)
+  i = 0
+  for(val in df$INCOME){
+    i = i+1
+    if(is.na(val)) {
+      if(is.na(df[i,"JOB"])) {
+        df[i,"INCOME"] = 0
+        #Will also change job type to unemployed if no income or job listed
+        df[i,"JOB"] = 'Unemployed' 
+      }
+      else{
+        df[i,"INCOME"] = incomes$INCOME[incomes$JOB == df[i,"JOB"]]
+      }
+    }
+  }
+  
+  #Job type: if job is NA but income is 0<, then it's likely they are employed; set job to 'unlisted'
+  df$JOB[is.na(df$JOB)] = "Unlisted"
+  
+  #Age: Set's it to median.  Not many NA's here
+  df$AGE[is.na(df$AGE)] = median(df$AGE, na.rm = TRUE)
+  
+  #Years on job: Set to median of that type of job
+  yearsonjob = aggregate(YOJ~JOB, df, median)
+  i = 0
+  for(val in df$YOJ){
+    i = i+1
+    if(is.na(val)) {
+      df[i,"YOJ"] = yearsonjob$YOJ[yearsonjob$JOB == df[i,"JOB"]]
+    }
+  }
+  
+  #Home value: Will assume NA means 0 home value (does not own home).  This one is up for debate
+  df$HOME_VAL[is.na(df$HOME_VAL)] = 0
+  
+  #Car Age.  Will set it to the median age of that type of car.  Linear regression using bluebook and cartype would be better
+  carages = aggregate(CAR_AGE~CAR_TYPE, df, median)
+  i = 0
+  for(val in df$CAR_AGE){
+    i = i+1
+    if(is.na(val)) {
+      df[i,"CAR_AGE"] = carages$CAR_AGE[carages$CAR_TYPE == df[i,"CAR_TYPE"]]
+    }
+    if(df[i,"CAR_AGE"] < 0) { #Someone set their car age to -3 in the training set
+      df[i,"CAR_AGE"] = 0
+    }
+    
+  }
+  
+  return(df)
+}
+
+
+
+url <- "https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Predicting%20Auto%20Insurance%20Claims/data/insurance_training_data.csv"
+
+df <- fetch_and_prep(url)
+
+summary(df)
+
+
+```
+
+Much better, especially as the missing data has been imputed (details of how are in the code comments).  We have lot's of variables to work with, and I'm not sure which ones are going to be meaningful.  A correlation plot might give us some ideas as to how each of the numeric variables interact.
+
+```{r}
+corrplot(cor(df[,c(2,4,6,7,9,14,16,17,20,23,24)], method = "pearson"), method = "square")
+
+```
+
+Not a whole lot of correlation between variables, and very little with the target variables.  The only notable exceptions are income with bluebook, car age, and home value, which are all fairly positively correlated correlated.  We'll examine variables further while modeling.
+
+## Modeling Crash Probability
+
+Let's start off with a simple base model (all variables) for predicting whether or not there was a crash claim.  We'll gauge performances using a holdout data-set, separated from the training set.
+
+```{r}
+#Train test split
+set.seed(1234567890)
+splitdex<- createDataPartition(df$TARGET_FLAG, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+validation <- df[-splitdex,]
+
+
+#Make the model
+model <- glm(TARGET_FLAG~.-TARGET_AMT, data = train, family = "binomial")
+
+summary(model)
+
+
+```
+
+This model finds many of the variables significant in predicting crashes, however there are some that should be removed as they aren't predictive.  Let's see how it performs on the validation set.
+
+```{r}
+make.predictions <- function(model, test, threshold = 0.5) {
+  
+    
+  test_pred_probs = predict(model, test, type = "response")
+  
+  test$predict_prob = test_pred_probs
+  
+  #Took most of this next line from: https://www.r-bloggers.com/2020/05/binary-logistic-regression-with-r/
+  test$predicted =  as.factor(ifelse(test_pred_probs >= threshold, 1, 0)) 
+  
+  return(test[,c("predict_prob","predicted")])
+  
+}
+predictions <- make.predictions(model, validation, threshold = 0.50)
+
+
+
+
+confusionMatrix(predictions$predicted, as.factor(validation$TARGET_FLAG), positive = '1')
+proc = roc(as.factor(validation$TARGET_FLAG), predictions$predict_prob)
+plot(proc)
+print(proc$auc)
+```
+
+This model has a decent accuracy, but that can be misleading.  If you recall, the data-set has about 74% cases of no crash; this only does a little better than predicting no crash for each instance.  The model's lower bound of the 95% confidence interval for accuracy is 77.4%, so this model is significantly better (at alpha = 0.05) than just guessing no crash.  
+
+One issue with this model is that there are a lot of variables that aren't very predictive.  There are also a few variables that, explored previously with the correlation plot, have shown to be correlated.  Let's try a LASSO model.  LASSO will rid us of some of the coefficients, deal with any co-linearity, and hopefully help us put together a better and simpler model.
+
+```{r}
+#I'm copying alot of this from a previous work of mine
+
+library(glmnet)  #Was a helpful guide: https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
+#There are random elements to this, but I'm not sure where (relaxed fit?)
+set.seed(1234567890)
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+train_X <- model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=train)  
+train_Y <- train$TARGET_FLAG
+
+val_X = model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=validation)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+LASSO_crash_model <- cv.glmnet(x = train_X,   #Predictor variables
+                      y = train_Y,
+                      family = "binomial", #Has it use logit
+                      nfolds = 20, #k fold cv
+                      intercept = TRUE,
+                      standardize = TRUE,
+                      type.measure = "class",  #uses missclassification error as loss
+                      alpha = 1) #Alpha = 1 is lasso.
+
+#Predicts the probability that the target variable is 1
+#setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+predictions <- predict(LASSO_crash_model, 
+                       newx = val_X,
+                       type = "response",
+                       s=LASSO_crash_model$lambda.min) 
+
+#Print's the coefficients the model uses
+print(coef.glmnet(LASSO_crash_model, s = LASSO_crash_model$lambda.min))
+```
+
+Fewer variables, but still quite a few.  The coefficients tend to make some sense.  For instance, one is more likely to crash if they have more kids driving, have more prior claims, drive more, and have more record points.  One is less likely to crash however if they are older, have more years at their job, earn more income, have a pricier car, are more educated, are unemployed (more careful), and use their own car.  One could probably boil down a lot of these variables to a 'responsibility' metric;  things like age and prior claims could all play into it.  Red cars, on the other hand, don't make a meaningful difference (lucky us).
+
+Let's see how the model performs. 
+
+
+
+```{r}
+confusionMatrix(as.factor(ifelse(predictions >= 0.5, 1, 0)), as.factor(validation$TARGET_FLAG), positive = '1')
+proc = roc(validation$TARGET_FLAG, predictions)
+plot(proc)
+print(proc$auc)
+
+
+```
+
+It's able to get rid of a few without predictors negatively impacting the accuracy or AUC much.   One other thing to consider is that this model finds fewer false positives, but more false negatives.  That said, it's not really any more accurate than the prior model, certainly not significantly different, and is only about an additional 5% better than just guessing no crash for all cases.  
+
+That being said, it's a fairly explainable model
+
+
+## Modeling Payout
+
+Now we need to predict how much those who were predicted to crash actually get.  I suspect the payout is proportional to both the value of the car and how damaging the crash is.  The value of the car is one of the variables (Bluebook), and I suspect the damage might correlate to some of the other variables like the type of car and various 'responsibility' type measures.  We'll see if any of the models confirm my suspicions.
+
+There are two different ways to go about selecting the data we want to use to train this: use data from all cases where there was a crash, or only use data where we predicted a crash.  Using all cases of crashes might be better at predicting the payout from crashes for the population, but using only predicted cases might be a more practical fit.  Let's try it with all cases, using a basic multiple linear regression model, and LASSO again to try to get the number of predictors down.
+
+Below is a basic multiple regression model
+
+```{r}
+#Select only instances where a crash occured
+all_crash <- subset(df, TARGET_FLAG == 1)
+all_crash$TARGET_FLAG <- NULL
+
+set.seed(0987654321)
+
+#Train test split
+splitdex <- createDataPartition(all_crash$TARGET_AMT, p = 0.8, list = FALSE)
+crash_train <- all_crash[splitdex,]
+crash_validation <- all_crash[-splitdex,]
+
+base_model_payout <- lm(TARGET_AMT~., crash_train)
+summary(base_model_payout)
+plot(base_model_payout)
+
+```
+
+Yeah, pretty bad.  This probably does not meet the assumptions of linear regression either.  The only significant predictor here is bluebook, which I suspected would be one of them (makes sense), but not the only one.  This model does not provide any evidence for my suspicions regarding the role of 'damage' in the payout.  One big problem with this model is the residuals are have a significant right-skew.  The response variable also has a right skew; let's fix that and see if it helps.  We'll also only bluebook as the predictor variable.
+
+```{r}
+#Transforms the response variable first
+bluebook_model_payout <- lm(log(crash_train$TARGET_AMT)~BLUEBOOK, crash_train)
+summary(bluebook_model_payout)
+plot(bluebook_model_payout)
+
+#Finds how well the predictions match up to the actual validation data
+#Also reverses the log transformation after predictions are made
+fit <- lm(exp(predict(bluebook_model_payout, crash_validation[,2:24]))~crash_validation$TARGET_AMT)
+plot(exp(predict(bluebook_model_payout, crash_validation[,2:24]))~crash_validation$TARGET_AMT)
+abline(0,1, col = "red")
+
+summary(fit)
+
+
+
+```
+
+The residuals look much better after a log transformation, but the model is still only weekly predictive, and cannot predict high payouts (>$5000) well at all.  That Q-Q plot is also pretty suspect.  Many variables such as car age and type will directly play into the bluebook value, and are implicated in this model as well.  Let's try using LASSO to reduce the number of coefficients (it seems like only one or a handful are useful), handle co-linearity, and see if it comes up with a better model.
+
+
+```{r}
+set.seed(0987654321)
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+crash_train_X <- model.matrix(~. -TARGET_AMT,data=crash_train)  
+
+#Needs a log transformation
+crash_train_Y <- log(crash_train$TARGET_AMT)
+
+crash_val_X = model.matrix(~. -TARGET_AMT,data=crash_validation)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+LASSO_payout_model <- cv.glmnet(x = crash_train_X,   #Predictor variables
+                      y = crash_train_Y,
+                      intercept = TRUE,
+                      standardize = TRUE,
+                      nfolds = 10, #k fold cv
+                      type.measure = "mse",  #uses mean squared error as loss
+                      alpha = 1) #Alpha = 1 is lasso.
+
+#setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model).  also corrects for the log transformation
+predictions <- exp(predict(LASSO_payout_model, newx = crash_val_X, s=LASSO_payout_model$lambda.min)) 
+
+#Print's the coefficients the model uses
+print(coef.glmnet(LASSO_payout_model, s = LASSO_payout_model$lambda.min))
+```
+
+```{r}
+
+plot(predictions~crash_validation$TARGET_AMT)
+abline(0,1, col = "red")
+fit <- lm(predictions~crash_validation$TARGET_AMT)
+
+summary(fit)
+
+```
+
+This is a very similar model to the Bluebook model.  The only other bit LASSO adds in here is if there have been 4 claims (fairly rare) then you the payout is less.  Also similar to the bluebook model, it doesn't work well, especially for predicting high payouts.  The Bluebook model does better when comparing the fit of predicted values vs actual values on the validation set.  
+
+As to the theory that Payout = Car-Value X Damage, we can confirm that car-value (bluebook) does play a significant role, but are unable to confirm that the amount of damage done has any affect.  This could be because either damage does not have a role, or the variables we have are unable to predict the amount of damage done.
+
+
+## Selecting Models and Making Predictions
+
+We'll be using the LASSO model to predict whether or not there was a crash, and the bluebook model to predict how much the payout was.  When evaluated on a holdout set, both classification models are similar statistics wise (similar accuracy, AUC, etc), but the LASSO model is simpler.  Of the payout prediction models, it appears the variables just aren't very predictive of cost, with the exception of Bluebook (car value), which makes sense.  A simple linear regression model with Bluebook and an intercept only out performed the others in terms of R^2 as evaluated on how well the predictions on a holdout set fit the real costs.  It's also a super simple model and highly sensible model, which is nice.  The residual plots for the bluebook model were also permissible, owing in great part to the log transformation of the response variable.
+
+
+Below the test set is imported, prepared, and predictions are made.  The predictions then saved locally.
+
+```{r}
+url <- "https://raw.githubusercontent.com/davidblumenstiel/Portfolio_2022/main/Predicting%20Auto%20Insurance%20Claims/data/insurance-evaluation-data.csv"
+
+test<- fetch_and_prep(url)
+
+#Not sure why, but this needs slighly different prep than the validation set
+test_X <- model.matrix(~.,data=test[,3:25]) 
+
+#Predicts probability of crash
+predictions <- data.frame(predict(LASSO_crash_model, newx = test_X, type = "response", s=LASSO_crash_model$lambda.min))
+colnames(predictions) <- "crash_probability"
+
+#If probability of a crash is >50% then it lists as crash (1), otherwise no crash (0)
+predictions <- predictions %>%
+  mutate(class = as.factor(round(crash_probability)))
+
+#If there's a crash, then it assigns a predicted cost for the payout, otherwise it sets it to 0
+
+#There are probably better ways to do this than overwriting
+predictions["cost"] <- exp(predict(bluebook_model_payout, test))
+predictions$cost[predictions$class == 0] <- 0 
+
+#Save predictions locally
+write.csv(predictions, file = "predictions.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
