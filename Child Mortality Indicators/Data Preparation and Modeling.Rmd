@@ -1,0 +1,527 @@
+---
+title: "Data Preparation and Modeling"
+author: "David Blumenstiel"
+date: "5/12/2021"
+output: html_document
+---
+
+
+## Data prep
+
+```{r}
+library(caret)
+library(tidyr)
+library(dplyr)
+library(data.table)
+```
+
+```{r}
+
+load_chi2018 <- function(var_select = c("water_score", "sanitation_score", "child_mortality", "Year", "ISO3", "CountryName")) {
+  
+  
+  library(tidyr)
+  library(dplyr)
+  library(data.table)
+  
+  
+  set.seed(1234567890)
+ 
+  df = read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Final_Project/chi-2018.csv")
+  
+  #Took some code from: https://stackoverflow.com/questions/50010196/replacing-na-values-from-another-dataframe-by-id
+  #and https://stackoverflow.com/questions/25908772/r-column-mean-by-factor
+  
+  x1 = df %>%
+    pivot_longer(
+      cols = starts_with("wat_"), 
+      names_to = "Year",
+      names_prefix = "wat_",
+      values_to = "water_score"
+    ) 
+    x1 = x1 %>% 
+      left_join(setDT(x1)[, mean(water_score, na.rm = TRUE), by=CountryName], by = "CountryName") %>%
+      mutate(water_score = ifelse(is.na(water_score), V1, water_score)) %>% #Replace NA with mean of values if available
+      select("Year", "water_score", "CountryName")   
+
+  
+  x2 = df %>%
+    pivot_longer(
+      cols = starts_with("san_"), 
+      names_to = "Year",
+      names_prefix = "san_",
+      values_to = "sanitation_score"
+    ) 
+  x2 = x2 %>%
+    left_join(setDT(x2)[, mean(sanitation_score, na.rm = TRUE), by=CountryName], by = "CountryName") %>%
+    mutate(sanitation_score = ifelse(is.na(sanitation_score), V1, sanitation_score)) %>% #Replace NA with mean of values if available
+    select("Year", "sanitation_score", "CountryName")    
+  
+    
+  
+  x3 = df %>%
+    pivot_longer(
+      cols = starts_with("chmort_"), 
+      names_to = "Year",
+      names_prefix = "chmort_",
+      values_to = "child_mortality"
+    ) 
+  x3 = x3 %>%
+    left_join(setDT(x3)[, mean(child_mortality, na.rm = TRUE), by=CountryName], by = "CountryName") %>%
+    mutate(child_mortality = ifelse(is.na(child_mortality), V1, child_mortality)) %>% #Replace NA with mean of values if available
+    select("Year", "child_mortality", "CountryName")   
+  
+  
+    
+  x4 = df %>%
+    pivot_longer(
+      cols = starts_with("mortality_"), 
+      names_to = "Year",
+      names_prefix = "mortality_",
+      values_to = "mortality_score"
+    ) 
+  x4 = x4 %>%
+    left_join(setDT(x4)[, mean(mortality_score, na.rm = TRUE), by=CountryName], by = "CountryName") %>%
+    mutate(mortality_score = ifelse(is.na(mortality_score), V1, mortality_score)) %>% #Replace NA with mean of values if available
+    select("Year", "mortality_score", "CountryName")   
+    
+  x5 = df %>%
+    pivot_longer(
+      cols = starts_with("CHI_v2018_"), 
+      names_to = "Year",
+      names_prefix = "CHI_v2018_",
+      values_to = "CHI_v2018"
+    ) 
+  x5 = x5 %>%
+    left_join(setDT(x5)[, mean(CHI_v2018, na.rm = TRUE), by=CountryName], by = "CountryName") %>%
+    mutate(CHI_v2018 = ifelse(is.na(CHI_v2018), V1, CHI_v2018)) %>% #Replace NA with mean of values if available
+    select("Year", "CHI_v2018", "CountryName")   
+  
+  out = x1 %>% merge(x2, by = c("CountryName", "Year")) %>%
+    merge(x3, by = c("CountryName", "Year")) %>%
+    merge(x4, by = c("CountryName", "Year")) %>%
+    merge(x5, by = c("CountryName", "Year"))
+  
+  out = as.data.frame(out)
+ 
+ 
+  #Adds back ISO3 abbreviations 
+  out <- out %>% merge(x = out, y = df[,1:2], by.x = "CountryName", by.y = "CountryName")
+  colnames(out)[8] <- "ISO3"
+  
+  #NA dropping
+  out <- data.frame(out[,var_select]) %>% drop_na()
+  
+ 
+  return(out)
+
+}
+
+
+
+```
+
+
+
+#Basic EDA 
+
+```{r}
+
+df <- load_chi2018(var_select=c("water_score", "sanitation_score", "child_mortality", "Year", "ISO3", "CountryName", "mortality_score", "CHI_v2018"))
+
+summary(df)
+
+hist(df$water_score)
+
+hist(df$sanitation_score)
+
+hist(df$child_mortality)
+
+hist(df$mortality_score)
+
+hist(df$CHI_v2018)
+
+df <- df[complete.cases(df),]
+
+```
+
+All very exponential distributed.
+
+```{r}
+library(corrplot)
+corrplot(cor(df[,c(1,2,3,7,8)], use = "pairwise.complete.obs"), type = "upper")
+```
+
+Also alot of collinearity.
+
+
+```{r}
+
+plot(df$child_mortality ~ df$water_score)
+
+plot(df$child_mortality ~ df$sanitation_score)
+```
+
+Going to need transformations to avoid problems with residuals and the assumptions of linear regression
+
+# Modeling
+
+Let's first explore the individual relationships between water and sanitation with child mortality.
+
+```{r}
+df <- load_chi2018()
+
+df$child_mortality <- log(df$child_mortality)
+df$water_score <- df$water_score^6
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+fit <- lm(child_mortality ~ water_score, data = train)
+
+summary(fit)
+plot(fit)
+
+plot(predict(fit, val) ~ val$child_mortality)
+
+hist(fit$residuals, breaks = 20)
+
+print(paste("Validation R^2: ", cor(predict(fit, val), val$child_mortality)^2))
+
+```
+
+After variable transformation, water-score alone will account for about 0.78 of the variation in child mortality
+
+```{r}
+df <- load_chi2018()
+
+df$child_mortality <- log(df$child_mortality)
+df$sanitation_score <- df$sanitation_score^2.5
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+fit <- lm(child_mortality ~ sanitation_score, data = train)
+
+summary(fit)
+plot(fit)
+
+plot(predict(fit, val) ~ val$child_mortality)
+
+hist(fit$residuals, breaks = 20)
+
+print(paste("Validation R^2: ", cor(predict(fit, val), val$child_mortality)^2))
+
+```
+
+After variable transformation, sanitation-score alone can also account for about 0.77-0.78 of the variation in child mortality
+
+
+
+
+
+```{r}
+
+df <- load_chi2018()
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+fit <- lm(log(child_mortality)^1.1 ~ I(water_score * sanitation_score), data = train)
+
+summary(fit)
+
+plot(fit)
+
+plot((exp(predict(fit, val)))^(1/1.1) ~ val$child_mortality)
+
+
+hist(fit$residuals, breaks = 20)
+
+
+```
+
+Basic linear regression with log and slight exponential transformation.  Uses an interaction term to get around collinearity issues.  Likely meets the criteria for linear regression although there is slight heteroskedascity; residuals are still fairly normal.
+
+
+Claims to have a fit of r^2=0.8, but the predictions vs fitted plot indicates this may not hold.  Also looks heteroskedastic.
+
+
+## Final model 1
+
+Also linear regression using an interaction term to avoid collinearity issues, but with exponential transformations of the response and predictor variables.  It's a somewhat better fit, with holds true when predictions are plotted against residuals.  Still has somewhat heteroskedastic residuals.
+
+
+```{r}
+df <- load_chi2018()
+
+df$child_mortality <- log(df$child_mortality) 
+df$sanitation_score <- df$sanitation_score^4
+df$water_score <- df$water_score  ^4
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+
+fit <- lm(child_mortality~ I(water_score + sanitation_score), data = train)
+
+summary(fit)
+
+plot(fit)
+
+plot(predict(fit, val) ~ val$child_mortality)
+
+hist(fit$residuals, breaks = 20)
+
+print(paste("Validation R^2: ", cor(predict(fit, val), val$child_mortality)^2))
+
+```
+
+## Final Model 2
+
+A ridge regression model (handles collinearity) with exponential transformations on the variables.  Fits about as well as the previous model, but maybe less heteroskedascity?  Residuals are kinda normally distributed, but maybe a little bimodal.
+
+
+```{r}
+
+df <- load_chi2018()
+
+df$child_mortality <- log(df$child_mortality)
+df$sanitation_score <- df$sanitation_score^5
+df$water_score <- df$water_score  ^5
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+
+
+
+library(glmnet)
+
+train_X <- model.matrix(~ water_score + sanitation_score , data=train)  
+train_Y <- train$child_mortality
+
+val_X = model.matrix(~ water_score + sanitation_score ,data=val)
+
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+ridge_model <- cv.glmnet(x = train_X,   #Predictor variables
+                      y = train_Y,
+                      family = "gaussian", 
+                      nfolds = 10, #k fold cv
+                      type.measure = "mse",  #uses mse as loss
+                      alpha = 0) #Alpha = 0 is ridge.
+
+#setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+predictions <- predict(ridge_model, 
+                       newx = val_X,
+                       type = "response",
+                       s=ridge_model$lambda.min) 
+#Print's the coefficients the model uses
+print(coef.glmnet(ridge_model, s = ridge_model$lambda.min))
+#r^2 : https://stats.stackexchange.com/questions/266592/how-to-calculate-r2-for-lasso-glmnet
+r2 <- ridge_model$glmnet.fit$dev.ratio[which(ridge_model$glmnet.fit$lambda == ridge_model$lambda.min)]
+print(paste("R^2: ",r2))
+
+#Correct for  transformation
+predictions <- predictions
+
+residuals <- val$child_mortality - predictions
+
+plot(predictions ~ val$child_mortality)
+
+
+plot(residuals ~ predictions)
+
+hist(residuals, breaks = 30)
+
+print(paste("Validation R^2: ", cor(predictions, val$child_mortality)^2))
+```
+
+## Adding "world" data
+
+```{r}
+#Checking for collinearity
+
+library(rnaturalearth)
+
+#Adds new data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+df <- load_chi2018()
+
+df <- merge(df, world, by.x = "ISO3", by.y = "iso_a3") #Preserved all of the countries in the origional set
+
+corrplot(cor(df[c("water_score", "sanitation_score", "child_mortality", 
+                  "pop_est", "gdp_md_est")], use = "pairwise.complete.obs"), type = "upper")
+
+
+```
+
+population and and the other new variable seem uncorrelated to child mortality, but somewhat correlated to each other; probably best to just use one if either.  We can also an economy variable (categorical), of which there are two which are presumably fairly correlated
+
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+df <- load_chi2018()
+
+df <- merge(df, world, by.x = "ISO3", by.y = "iso_a3")
+
+df$child_mortality <- log10(df$child_mortality) #Still needs a transformation
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+fit <- lm(child_mortality ~ economy, data = train)
+
+summary(fit)
+
+plot(fit) 
+
+plot(predict(fit, val) ~ val$child_mortality)
+
+hist(fit$residuals, breaks = 20)
+
+```
+
+Economy seems to be fairly well correlated with child_mortality.
+Pop_est was also tested and proved to be highly unpredictive.
+
+Let's see what economy + the previous variables can acomplish
+
+## Final model 3
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+df <- load_chi2018()
+
+df <- merge(df, world, by.x = "ISO3", by.y = "iso_a3")
+
+
+df$child_mortality <- log(df$child_mortality)
+df$sanitation_score <- df$sanitation_score^4
+df$water_score <- df$water_score  ^4
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+fit <- lm(child_mortality ~ economy + I(water_score + sanitation_score), data = train)
+
+summary(fit)
+
+plot(fit) 
+
+plot(predict(fit, val) ~ val$child_mortality)
+
+hist(fit$residuals, breaks = 20)
+
+print(paste("Validation R^2: ", cor(predict(fit, val), val$child_mortality)^2))
+```
+
+Very well fitting; adding economy helps.  Maybe slightly heteroscedastic residuals, although they are still normally distributed.
+
+## Final model 4
+
+```{r}
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+df <- load_chi2018()
+
+df <- merge(df, world, by.x = "ISO3", by.y = "iso_a3")
+
+
+df$child_mortality <- log(df$child_mortality)
+df$sanitation_score <- df$sanitation_score^3
+df$water_score <- df$water_score  ^3
+
+
+splitdex <- createDataPartition(df$child_mortality, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+val <- df[-splitdex,]
+
+
+
+
+library(glmnet)
+
+train_X <- model.matrix(~ water_score + sanitation_score + economy, data=train)  
+train_Y <- train$child_mortality
+
+val_X = model.matrix(~ water_score + sanitation_score + economy,data=val)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+ridge_model <- cv.glmnet(x = train_X,   #Predictor variables
+                      y = train_Y,
+                      family = "gaussian", 
+                      nfolds = 10, #k fold cv
+                      type.measure = "mse",  #uses mse as loss
+                      alpha = .5) #Alpha = 0 is ridge.
+
+#setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+predictions <- predict(ridge_model, 
+                       newx = val_X,
+                       type = "response",
+                       s=ridge_model$lambda.min) 
+#Print's the coefficients the model uses
+print(coef.glmnet(ridge_model, s = ridge_model$lambda.min))
+#r^2 : https://stats.stackexchange.com/questions/266592/how-to-calculate-r2-for-lasso-glmnet
+r2 <- ridge_model$glmnet.fit$dev.ratio[which(ridge_model$glmnet.fit$lambda == ridge_model$lambda.min)]
+print(r2)
+
+#Correct for  transformation
+predictions <- predictions
+
+residuals <- val$child_mortality - predictions
+
+mean(residuals)
+
+plot(predictions ~ val$child_mortality)
+
+
+plot(residuals ~ predictions)
+
+#ridge_model$glmnet.fit
+
+
+hist(residuals, breaks = 30)
+
+print(paste("Validation R^2: ", cor(predictions, val$child_mortality)^2))
+
+```
+
+Elastic net regression produces a similar result to linear.  Performs slightly better than ridge alone.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
