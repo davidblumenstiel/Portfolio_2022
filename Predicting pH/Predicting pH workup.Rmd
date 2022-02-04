@@ -1,0 +1,601 @@
+---
+title: 'Predictive Analysis Project2 :'
+author: Jered Ataky, Matthew Baker, Christopher Bloome, David Blumenstiel, Dhairav Chhatbar
+date: "7/7/2021"
+output: html_document
+---
+
+## Libraries used
+
+```{r}
+library(dplyr)
+library(readxl)
+library(skimr)
+library(tidyr)
+library(kableExtra)
+library(mice)
+library(VIM)
+library(corrplot)
+library(ggcorrplot)
+library("caret")
+library("glmnet")
+library("earth")
+library("pls")
+library("e1071")
+library("xgboost")
+```
+
+
+
+
+## Data Prepration
+
+Before we can make the models, we need the data in a form we can use.
+
+Below will download the data from GitHub, and save it as a dataframe.
+
+```{r, message=FALSE, warning=FALSE, message=FALSE}
+
+train_dataset <- read.csv("https://raw.githubusercontent.com/jnataky/Predictive_Analytics/main/Project2/StudentData%20-%20TO%20MODEL.csv")
+evaluation_dataset <- read.csv("https://raw.githubusercontent.com/jnataky/Predictive_Analytics/main/Project2/StudentEvaluation-%20TO%20PREDICT.csv")
+
+
+evaluation_dataset$PH <- NULL  #Having an empty column get's in the way for most of this
+
+
+head(train_dataset)
+
+
+
+```
+
+Looks good.
+
+## Explorative Data Analysis
+
+Now we want to analyse the data.  See the report for a detailed analysis; this produces some figures which are helpful.
+
+```{r}
+skim(train_dataset)
+
+sum(s$n_missing)
+
+mean(s$complete_rate)
+
+sum(s$n_missing)/(2571*32)
+```
+
+```{r, warning=FALSE}
+aggr(train_dataset, col=c('#F8766D','#00BFC4'), numbers=TRUE, sortVars=TRUE, labels=names(train_dataset), cex.axis=.7, gap=3, ylab=c("Missing data","Pattern"))
+```
+
+```{r, warning=FALSE}
+train_dataset %>% select(PH) %>% ggplot( aes(PH)) + geom_density(fill="steelblue", bins = 30)
+```
+
+
+```{r, fig.height=10, warning=FALSE, message=FALSE}
+
+train_dataset %>% select(-PH, -Brand.Code) %>% 
+  tidyr::gather(key = "variable", value = "measurement",everything()) %>% 
+  arrange(desc(variable)) %>%
+  ggplot(aes(measurement)) + geom_density(position=position_dodge(), fill="steelblue") +
+  facet_wrap(~variable, scales = "free") +
+  theme_minimal() + 
+  ggtitle("Distribution of Predictor Variables")
+```
+
+```{r, fig.height=10}
+q <- cor(train_dataset%>%select(-Brand.Code), use = "na.or.complete")
+ggcorrplot(q, type = "lower", outline.color = "white", hc.order = TRUE,
+           colors = c("#6D9EC1", "white", "#E46726"),
+           lab = TRUE, show.legend = FALSE, tl.cex = 8, lab_size = 3) 
+
+
+
+```
+
+
+
+## Data Transformation
+
+
+Below will impute missing data via pmm using the mice package, and rename the first column and change it to factor
+
+```{r}
+preprocess <- function(df) {
+  colnames(df)[1] <- "Brand"  #Changes name of first column to somthing less obtuse
+  df$Brand <- as.factor(df$Brand)#Changes brand to factor
+  
+  #Uses MICE for imputation of missing values.  Going with mostly defaults.
+  imputed <- mice(df,
+     m = 5,
+     maxit = 5,
+     seed = 10,
+     trace = FALSE)
+  
+  df <- complete(imputed)
+  
+  
+  return(df)
+}
+
+train_dataset <- preprocess(train_dataset)
+evaluation_dataset <- preprocess(evaluation_dataset)
+```
+
+
+## Modeling
+
+R has this really nice package called Caret, which gives us a function that allows us to easily train a bunch of models with only minor adjustments.  It can search for optimal parameters, take manual specifications, you name it.  We'll use it to train all of the models.
+
+But, first, we need split off a test set to judge performance.  We'll do 80:20 train/test
+
+```{r}
+set.seed(1234567890) #So you see the same thing I do
+splitdex <- createDataPartition(train_dataset$PH, p = 0.8, list = FALSE) #Index for split
+
+
+train <- train_dataset[splitdex,]
+test <- train_dataset[-splitdex,]
+
+```
+
+
+
+
+
+
+### LASSO
+
+We can probably do away with alot of these values and get a simpler model.  LASSO, a penalized model, will aim to do such  We'll implemet this with caret for simplicity.
+
+```{r}
+set.seed(1234567890) #So you see the same thing I do
+
+#got help from: http://www.sthda.com/english/articles/37-model-selection-essentials-in-r/153-penalized-regression-essentials-ridge-lasso-elastic-net/
+#and: https://stackoverflow.com/questions/57712116/regarding-preprocessing-in-lasso-using-caret-package-in-r
+
+#The parameters we want it to try
+grid <- expand.grid(alpha = 1,
+                    lambda =10^seq(-5, 5, length = 1000)) #Lot's of lambda values to choose from
+
+#Adds crossvalidation
+tc = trainControl(method = "cv",   #Cross-validation
+                  number = 10)
+
+#Fit's the model
+lassoFit <- caret::train(PH ~ ., data = train, 
+                  method = "glmnet",   #glmnet lets us fit penalized maximum likelihood glms (lasso, ridge, elastic) 
+                  preProcess = c("center", "scale"), #Data needsa to be centered and scaled for this 
+                  tuneGrid = grid,
+                  trControl = tc)
+
+lassoFit$bestTune  
+
+coef(lassoFit$finalModel,lassoFit$bestTune$lambda)
+
+
+```
+
+The best model was made using a lambda of 0.0002 ish.  This value was the most effective in terms of reducing RMSE, but it's so low it didn't really get rid of any coefficients .  For our purposes, an accurate model is more important than a simple one, so we'll keep the low alpha.  Let's see how it does on the validation set.
+
+```{r}
+#Makes preictions
+lasso_predictions <- predict(lassoFit, test)
+
+#Calculates RMSE and R2
+print(paste("RMSE: ", RMSE(lasso_predictions, test$PH), "    R2: ", caret::R2(lasso_predictions, test$PH)))
+
+
+```
+
+Performance wise, looks fairly good.  Let's compare it to some other models.
+
+
+### Elastic-Net
+
+Easy enough to try out one of these, having alerady made the LASSO model.  For this, we just need to give some values of alpha to choose from.
+
+```{r}
+set.seed(1234567890) #So you see the same thing I do
+
+#got help from: http://www.sthda.com/english/articles/37-model-selection-essentials-in-r/153-penalized-regression-essentials-ridge-lasso-elastic-net/
+#and: https://stackoverflow.com/questions/57712116/regarding-preprocessing-in-lasso-using-caret-package-in-r
+
+
+
+tc = trainControl(method = "cv",   #Cross-validation
+                  number = 10)
+
+
+elasticFit <- caret::train(PH ~ ., data = train, 
+                  method = "glmnet",   #glmnet lets us fit penalized maximum likelihood glms (lasso, ridge, elastic) 
+                  preProcess = c("center", "scale"), #Data needsa to be centered and scaled for this 
+                  tuneLength = 20, #Going to let it choose alpha and lambda without any sugestions
+                  trControl = tc)
+
+elasticFit$bestTune  
+
+coef(elasticFit$finalModel,elasticFit$bestTune$lambda)
+
+
+```
+
+It chose a similarly small lambda as the LASSO model.  Let's see how it performs on the test set.
+
+```{r}
+elastic_predictions <- predict(elasticFit, test)
+
+
+print(paste("RMSE: ", RMSE(elastic_predictions, test$PH), "    R2: ", caret::R2(elastic_predictions, test$PH)))
+
+
+```
+
+Does only slightly better than LASSO.
+
+
+### MARS
+
+Let's try one of these.  I'm a bit concerned that the collinear variables could lead to overfitting, but we can test things out on the validation set.
+
+
+```{r}
+set.seed(1234567890)
+
+#got help from here: https://bradleyboehmke.github.io/HOML/mars.html
+
+tc = trainControl(method = "cv",   #Cross-validation
+                  number = 10)
+
+#The parameters we want it to try
+grid <- expand.grid(degree = 4:7,   #automatic tune won't let you try more than one of these
+                    nprune = seq(60, 150, length = 10))
+
+marsFit <- caret::train(PH ~ ., data = train, 
+                        method = "earth",   #earth has mars model.  I know how that sounds 
+                        preProcess = c("center", "scale"), #why not
+                        tuneGrid = grid, 
+                        trControl = tc)
+
+
+
+marsFit$bestTune
+
+
+```
+
+
+An initital run showed better performance with the highest degree and number of number of tunes used.  Above, the model was re-trained using higher degree and term numbers (not including the origional set to speed this up).
+
+It found 60 terms and 5 degrees to have the best performance., with an RMSE and R2 around 0.12 and 0.52 respectively.  Let's evaluate on the validation set.
+
+```{r}
+#Makes preictions
+mars_predictions <- predict(marsFit, test)
+
+#Get's RMSE and R2
+print(paste("RMSE: ", RMSE(mars_predictions, test$PH), "    R2: ", caret::R2(mars_predictions, test$PH)))
+
+
+```
+
+It seems the concerns over overfitting were valid.  The RMSE and R2 are not nearly as good when tested on the validation set.  
+
+
+### Partial Least Squares
+
+This should handle multicolinearity better, and should do well considering the number of variables.
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: http://www.sthda.com/english/articles/37-model-selection-essentials-in-r/152-principal-component-and-partial-least-squares-regression-essentials/
+
+tc = trainControl(method = "cv",   #Cross-validation
+                  number = 10)
+
+#This one automatically tries different parameters
+plsFit <- caret::train(PH ~ ., data = train, 
+                        method = "pls",   # from the "pls" package
+                        preProcess = c("center", "scale"), 
+                        tuneLength = 32,  #Tries different parameters.  Max in this case is nvar - 1
+                        trControl = tc)
+
+plsFit
+```
+
+Let's try it out:
+
+```{r}
+pls_predictions <- predict(plsFit, test)
+
+
+print(paste("RMSE: ", RMSE(pls_predictions, test$PH), "    R2: ", caret::R2(pls_predictions, test$PH)))
+
+
+```
+
+Does just about the same.
+
+### SVM (for regression)
+
+Let's try a SVM for regression (not classification)
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: https://stackoverflow.com/questions/49543307/svm-with-radial-kernel-for-numeric-response-in-caret-package
+
+tc = trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Will also try to adjust parameters automatically
+svmFit <- caret::train(PH ~ ., data = train, 
+                        method = "svmRadial",   # from the "e1071" package
+                        preProcess = c("center", "scale"), 
+                        tuneLength = 10, 
+                        trControl = tc)
+
+svmFit
+```
+
+Let's see how it does on the validation set.
+
+```{r}
+svm_predictions <- predict(svmFit, test)
+
+
+print(paste("RMSE: ", RMSE(svm_predictions, test$PH), "    R2: ", caret::R2(svm_predictions, test$PH)))
+
+
+```
+
+It does particularly well.  
+
+
+### Random Forest
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: 
+
+tc <- trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Becuase this takes a long time to train, the values below were pre-selected as the best tune from several runs.
+grid <- expand.grid(.mtry = c(18)) 
+
+rfFit <- caret::train(PH ~ ., data = train, 
+                      method = "rf",   
+                      preProcess = c("center", "scale"), 
+                      tuneGrid = grid,  
+                      trControl = tc,
+                      ntrees = 1000)
+
+rfFit
+```
+
+Promising.  I tried several combinations of mtrys and ntrees, and above did just as well in a shorter time.
+
+```{r}
+rf_predictions <- predict(rfFit, test)
+
+
+print(paste("RMSE: ", RMSE(rf_predictions, test$PH), "    R2: ", caret::R2(rf_predictions, test$PH)))
+
+
+```
+
+The best model so far.  better on the testing set than the training set
+
+
+### Neural Network
+
+Not particularly transparent, but might get the job done.
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: 
+
+tc <- trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Tries a combinations of the parameters below
+grid <- expand.grid(decay = 10^seq(-3,-0.5,length = 10),
+                    size = 1:5)
+
+nnFit <- caret::train(PH ~ ., data = train, 
+                      method = "nnet",   
+                      preProcess = c("center", "scale"), 
+                      linout=TRUE, 
+                      trace = FALSE,
+                      tuneGrid = grid,
+                      trControl = tc)
+
+nnFit
+```
+
+Selected some values right in the middle, but ultimately doesn't look as promising as random forest or svm.
+
+```{r}
+nnet_predictions <- predict(nnFit, test)
+
+
+print(paste("RMSE: ", RMSE(nnet_predictions, test$PH), "    R2: ", caret::R2(nnet_predictions, test$PH)))
+
+
+```
+
+Decent, but not the best so far.
+
+
+
+
+### Cubist (M5)
+
+A strange take on decision trees.  Random forest did well; maybe this will build on that?
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: 
+
+tc <- trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Another case where tuning was done seperately due to long runtimes.  The values below are the best selections for both parameters.
+grid = expand.grid(committees = 100,
+                   neighbors = 8)
+
+cubistFit <- caret::train(PH ~ ., data = train, 
+                      method = "cubist",   
+                      preProcess = c("center", "scale"),
+                      tuneGrid = grid,
+                      trControl = tc)
+
+cubistFit
+```
+
+I trained this with additional parameter combinations to those tried above (not included incase you want to run this in under half an hr).  In the above attempt, the best combination was found
+
+```{r}
+cubist_predictions <- predict(cubistFit, test)
+
+
+print(paste("RMSE: ", RMSE(cubist_predictions, test$PH), "    R2: ", caret::R2(cubist_predictions, test$PH)))
+
+
+```
+
+Just about on par with the random forest
+
+
+### eXtreme Gradient Boosting
+
+Saw on list, Sounded cool.  Gradient boosted decision trees.
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: 
+
+tc <- trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Tries alot of different parameters.  These were narrowed down in seperate training sessisons.
+
+grid <- expand.grid(lambda = c(1.39 * 10^-5, 10^-5, 1.90 * 10^-5),
+                    alpha = c(0.0001,0.00046, 0.001),
+                    nrounds = c(80,90,100),
+                    eta = 0.3)
+
+xgbFit <- caret::train(PH ~ ., data = train, 
+                      method = "xgbLinear",   
+                      preProcess = c("center", "scale"),
+                      tuneGrid = grid,
+                      trControl = tc)
+
+xgbFit
+```
+
+parameters were tuned individually.  The last iteration of training is shown above.  This model seems to perform well, but lets double check on the test set.
+
+```{r}
+xgb_predictions <- predict(xgbFit, test)
+
+
+print(paste("RMSE: ", RMSE(xgb_predictions, test$PH), "    R2: ", caret::R2(xgb_predictions, test$PH)))
+
+
+```
+
+It does very well.
+
+
+### K-Nearest Neighbors
+
+Another basic but good one.
+
+```{r}
+set.seed(1234567890) #so you see what I do
+
+#took help from here: 
+
+tc <- trainControl(method = "cv",   #Cross-validation
+                  number = 5)
+
+#Very simple to tune these types of models.  K is usually like 5
+grid <- expand.grid(k = 1:10)
+
+knnFit <- caret::train(PH ~ ., data = train, 
+                      method = "knn",   
+                      preProcess = c("center", "scale"),
+                      tuneGrid = grid,
+                      trControl = tc)
+
+knnFit
+```
+
+```{r}
+knn_predictions <- predict(knnFit, test)
+
+
+print(paste("RMSE: ", RMSE(knn_predictions, test$PH), "    R2: ", caret::R2(knn_predictions, test$PH)))
+
+
+```
+
+
+Not bad, but not the best.
+
+
+
+
+
+## Best Model Analysis
+
+### Important variables
+
+
+```{r}
+varImp(rfFit)
+
+rfFit
+```
+
+### Residuals
+
+Let's plot out the resiuals
+
+```{r}
+plot(rf_predictions ~ test$PH, main = "Random Forest Predictions vs Fit", #Plot's predictions vs actual
+     xlab = "Actual pH",
+     ylab = "Predicted pH") 
+
+hist(residuals(rfFit), # Histogram of residuals
+     breaks = 50, 
+     xlab = "Residuals", 
+     main = "Random Forest Model Residuals Distribution") 
+
+
+```
+
+
+
+
+
+## Forcasting & Conclusion
+
+We'll go with random forest.  It performed among the best on the test set.
+
+```{r}
+evaluation_dataset$PH <- predict(rfFit, evaluation_dataset)
+
+write.csv(evaluation_dataset, "Group1_Project2_Predictions.csv", row.names = FALSE)
+```
+
+
